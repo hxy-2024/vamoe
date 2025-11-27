@@ -10,7 +10,7 @@ class YParams():
 
     if print_params:
       print("------------------ Configuration ------------------")
-#增加了encoding='utf-8'
+#增加了encoding='utf-8'！！！！！！！！！！！！！！！
     with open(yaml_filename,encoding='utf-8') as _file:
 
       for key, val in YAML().load(_file)[config_name].items():

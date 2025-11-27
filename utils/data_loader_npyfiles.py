@@ -358,8 +358,14 @@ class Era5Data(Dataset):
             #     self.climate_lst.append(climate_features)
             #     self.climate_surface_lst.append(climate_surface_features)
 
+
+
         x = np.concatenate(inputs_lst, axis=0).astype(np.float32)    # [t,h,w,level,feature]
         label = np.concatenate(label_lst, axis=0).astype(np.float32)
+        #使用stack增加维度，将4维变为5维！！！！！！！！！！！！！！！！
+        # x = np.stack(inputs_lst, axis=0).astype(np.float32) 
+        # label = np.stack(label_lst, axis=0).astype(np.float32)
+
 
         if surface_features != []:
             x_surface = np.concatenate(inputs_surface_lst, axis=0).astype(np.float32)
@@ -499,7 +505,7 @@ class Era5Data(Dataset):
         '''process_fn'''
         # print('x shape:', x.shape)
         # print('label shape:', label.shape)
-#数据维度不匹配，增加时间步为1
+        #数据维度不匹配，增加时间步为1！！！！！！！！！！！！！！！！！
         if len(x.shape) == 4:
                 # 如果只有4维，添加时间步维度
                 x = x[np.newaxis, ...]
