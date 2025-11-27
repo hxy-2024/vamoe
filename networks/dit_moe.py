@@ -430,6 +430,7 @@ class ChannelMoeBlock(nn.Module):
         self.GateEmbedder = nn.Linear(embed_dim, embed_dim, bias=True)
         # self.GateEmbedders = nn.ModuleList([nn.Linear(embed_dim, embed_dim, bias=True) for i in range(num_experts)])
 
+        #创建num_experts个独立的 MoeMLP 实例。所有的专家结构相同，但拥有独立的、不共享的权重参数。
         self.experts = nn.ModuleList([MoeMLP(hidden_size=(self.topk), intermediate_size=embed_dim, output_size=embed_dim, pretraining_tp=pretraining_tp) for i in range(num_experts)])
 
         self.n_shared_experts = 2
@@ -448,11 +449,11 @@ class ChannelMoeBlock(nn.Module):
             y = self.shared_experts(identity)
 
         for i, expert in enumerate(self.experts):
+            #挑选出该专家负责的特定通道
             gate_feature = hidden_states * posembed[i]
             # gate_feature = self.GateEmbedders[i](gate_feature)
             gate_feature = self.GateEmbedder(gate_feature)
             # print(gate_feature.shape, gate_feature[0, 100:200, 10])
-
             gate_weight, gate_idx = torch.topk(gate_feature, k=(self.topk), dim=(-1))
             gate_weight = gate_weight.softmax(-1)
             gather_states = torch.gather(hidden_states, dim=(-1), index=gate_idx)

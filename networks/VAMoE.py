@@ -120,7 +120,7 @@ class VAMoE(nn.Module):
         elif self.model_type == 'vit':
             if allow_print:   logging.info('********   Running ViT model!!!    *********')
             self.blocks = nn.ModuleList([
-                ViTBlock(
+                ViTBlock(#ViTBlock 的 num_heads 参数，即多头注意力机制的头数,循环self.depth次，每次创建一个ViTBlock
                     dim=self.embed_dim, num_heads=self.num_blocks, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
                     drop_path=dpr[i], norm_layer=norm_layer,
                     window_size=window_size if ((i + 1) % interval != 0) else num_patches,
@@ -268,7 +268,7 @@ class VAMoE(nn.Module):
 
     def forward(self, x, target=None, posembed=None, run_mode='train', expert_weight=0.01):
         self.run_mode = run_mode
-
+        # x为transform可接受的数据
         x = self.encoder(x)
         recons = self.decoder(x)
         
@@ -278,6 +278,7 @@ class VAMoE(nn.Module):
             posembed = self.posembedder(posembed)
 
         loss = 0
+        #self.blocks的数量由encoder_depths决定
         for i, blk in enumerate(self.blocks):
             if self.model_type == 'vit':
                 # if i == 1:
