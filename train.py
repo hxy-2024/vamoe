@@ -56,6 +56,51 @@ class Trainer():
         self.train_data_loader, self.train_dataset, self.train_sampler = get_data_loader_npy(params, dist.is_initialized(), run_mode='train')
         self.valid_data_loader, self.valid_dataset = get_data_loader_npy(params, dist.is_initialized(), run_mode='valid')
 
+        # =================【新增：检查数据并写入日志】=================!!!!!!!!!!!!!!!!!!!!!!
+        if self.world_rank == 0: # 只在主进程记录，避免重复
+            logging.info("="*30)
+            logging.info("正在检查 train_data_loader 内容...")
+            
+            logging.info(f"1. train_data_Loader 配置的 Batch Size: {self.train_data_loader.batch_size}")
+            logging.info(f"2. train_data_Loader 中的总批次数: {len(self.train_data_loader)}")
+
+            try:
+                # 获取第一个 batch
+                first_batch = next(iter(self.train_data_loader))
+                inputs, labels = first_batch
+                
+                logging.info("3. 输入数据 (Inputs) 详情:")
+                logging.info(f"   - 格式 (Shape): {inputs.shape}")
+                # 判断是否包含时间维度
+                if len(inputs.shape) == 5:
+                    logging.info(f"     [Batch, Time, Channels, Height, Width]")
+                elif len(inputs.shape) == 4:
+                    logging.info(f"     [Batch, Channels, Height, Width] (Time维度可能被压缩)")
+                
+                logging.info(f"   - 数据类型: {inputs.dtype}")
+                
+                logging.info("4. 标签数据 (Labels) 详情:")
+                logging.info(f"   - 格式 (Shape): {labels.shape}")
+
+                # 简单的内容采样（写入日志）
+                # if len(inputs.shape) == 4:
+                #     sample_vals = inputs[0, 0, :5, :5].flatten().tolist()
+                # else:
+                #     sample_vals = inputs[0, 0, 0, :5, :5].flatten().tolist()
+                # logging.info(f"5. 数据采样 (前5x5像素): {sample_vals}")
+
+            except Exception as e:
+                logging.error(f"检查数据时发生错误: {e}")
+            
+            logging.info("="*30)
+        if self.world_rank == 0:  # 仅在主进程打印，避免多卡重复输出
+            logging.info("="*30)
+            logging.info(f"Training Strategy Configuration:")
+            logging.info(f"   t_out_train (Autoregressive Steps): {self.params['t_out_train']}")
+            logging.info(f"   t_in (Input Steps): {self.params['t_in']}")
+            logging.info("="*30)
+        # ====================================================================
+
         self.loss_type = params['loss']
         self.loss_weight = params['loss_weight']
 
@@ -98,7 +143,21 @@ class Trainer():
         #                   embed_dim = 768,
         #                   num_layers = 16).to(self.device) 
         self.model = VAMoE(params, mlp_ratio=self.mlp_ratio).to(self.device)
-
+        # =================【新增代码：打印 Block 结构信息】=================！！！！！！！！！！！！！！
+        if self.world_rank == 0:  # 仅在主进程打印，防止多卡重复输出
+            logging.info("="*30)
+            logging.info("[Model Structure Check] Details of the first Block:")
+            try:
+                # 打印 self.blocks 中的第 0 个 Block
+                # 因为所有 Block 结构通常是一样的，看一个就够了，打印全部会太长
+                logging.info(self.model.blocks[0])
+            except AttributeError:
+                logging.warning("Could not find 'blocks' attribute in model.")
+            except Exception as e:
+                logging.warning(f"Failed to print block info: {e}")
+            logging.info("="*30)
+        # ====================================================================
+        
         if self.params.enable_nhwc:
             # NHWC: Convert model to channels_last memory format
             self.model = self.model.to(memory_format=torch.channels_last)
@@ -177,7 +236,8 @@ class Trainer():
             assert self.params['num_exports'] == num_feature+1, 'num_expert should be equal to num_feature + 1'
         else:
             assert self.params['num_exports'] == num_feature, 'num_expert should be equal to num_feature'
-
+        # 创建一个形状为 [专家数, 总通道数] 的全 0 矩阵
+        # 总通道数 = 高空变量数 * 层数 + 表面变量数
         inputs = torch.zeros([self.params['num_exports'], num_level * num_feature + num_surface])
         for i in range(num_feature):
             inputs[i, i*num_level:(i+1)*num_level] = torch.ones(num_level)
@@ -263,12 +323,28 @@ class Trainer():
             self.iters += 1
             # adjust_LR(optimizer, params, iters)
             data_start = time.time()
-            inp, target = map(lambda x: x.to(self.device, dtype = torch.float), data)      
+            inp, target = map(lambda x: x.to(self.device, dtype = torch.float), data) 
+
+            # =================【新增：只在第一个Batch检查数据内容】=================!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            # 条件解释：
+            # 1. i == 0: 只看当前 Epoch 的第一个 Batch
+            # 2. self.world_rank == 0: 只在主进程打印，防止多卡重复打印
+            # 3. (可选) self.epoch == 1: 如果只想在训练刚开始时看一次，可以加上这个条件
+            if i == 0 and self.world_rank == 0 and self.epoch == 1: 
+                logging.info(f"\n[Data Check] Epoch {self.epoch} Batch {i} Content:")
+                logging.info(f"   inp shape:    {inp.shape}")
+                logging.info(f"   target shape: {target.shape}")
+                
+                # 打印统计信息，检查归一化
+                logging.info(f"   inp stats:    min={inp.min():.4f}, max={inp.max():.4f}, mean={inp.mean():.4f}")
+                
+                logging.info("-" * 30)
+            # ====================================================================
+
+            #从输入数据中，把倒数第 2 个通道（即地形数据）单独提取出来，保留其维度，以便在后续的自回归预测步骤中重复使用（拼接到预测结果上）     
             if self.params.orography and self.params.two_step_training:
                 orog = inp[:,-2:-1] 
-
             data_time += time.time() - data_start
-
             tr_start = time.time()
 
             t_out_train = self.params['t_out_train']
@@ -276,8 +352,12 @@ class Trainer():
                 # logging.info(f"multi outputs training: {t_out_train}, number of loop: {j}, target: {target.shape}, {inp[0,0,10, 10:20]}")
 
                 if t_out_train == 1:
+                    # 如果只预测一步，标签就是整个 target
                     tar = target.clone()
                 else:
+                    # 如果是多步预测：
+                    # j > 0 时（第二步及以后），把上一步的预测结果 (gen) 作为当前的输入 (inp)
+                    # 这就是“自回归”：自己吃自己的产出
                     if j>0:   inp = gen.detach()
                     tar = target[:, j]
 
@@ -553,7 +633,7 @@ class Trainer():
         torch.save({'iters': self.iters, 'epoch': self.epoch, 'model_state': model.state_dict(),
                       'optimizer_state_dict': self.optimizer.state_dict()}, checkpoint_path)
 
-    def restore_checkpoint(self, checkpoint_path):
+    # def restore_checkpoint(self, checkpoint_path):
         """ We intentionally require a checkpoint_dir to be passed
             in order to allow Ray Tune to use this function """
         
@@ -574,7 +654,88 @@ class Trainer():
 
         if self.params.resuming:  #restore checkpoint is used for finetuning as well as resuming. If finetuning (i.e., not resuming), restore checkpoint does not load optimizer state, instead uses config specified lr.
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    #增加修改图像分辨率后自动调整pos_embed！！！！！！！！！！！！！！！！！！！！！
+    def restore_checkpoint(self, checkpoint_path):
+        """ We intentionally require a checkpoint_dir to be passed
+            in order to allow Ray Tune to use this function """
+        import math
+        import torch.nn.functional as F
+        from collections import OrderedDict
 
+        # 1. 加载 Checkpoint
+        logging.info(f"Loading checkpoint from {checkpoint_path}")
+        # 增加 weights_only=False 以避免 pickle 安全警告错误
+        checkpoint = torch.load(checkpoint_path, map_location='cuda:{}'.format(self.params.local_rank), weights_only=False)
+        
+        # 2. 处理 'module.' 前缀 (DDP带来的)
+        state_dict = checkpoint['model_state']
+        new_state_dict = OrderedDict()
+        for key, val in state_dict.items():
+            # 去除 module. 前缀
+            if key.startswith('module.'):
+                name = key[7:]
+            else:
+                name = key
+            new_state_dict[name] = val 
+            
+        # 3. 【核心修复】自动处理 pos_embed 尺寸不匹配问题
+        if 'pos_embed' in new_state_dict:
+            pos_embed_ckpt = new_state_dict['pos_embed']
+            
+            # 获取当前模型 (处理 DDP 封装情况)
+            model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+            # 获取当前模型需要的 pos_embed 形状
+            current_shape = model_ref.pos_embed.shape
+            
+            # 如果形状不一致，进行插值
+            if pos_embed_ckpt.shape != current_shape:
+                logging.info(f"Resize pos_embed: {pos_embed_ckpt.shape} -> {current_shape}")
+                
+                # 获取参数
+                num_patches_ckpt = pos_embed_ckpt.shape[1]
+                embed_dim = pos_embed_ckpt.shape[2]
+                # 获取当前模型的高和宽 (Patch Grid Size)
+                new_h = model_ref.h
+                new_w = model_ref.w
+                
+                # 推算旧权重的 h 和 w (假设长宽比与新模型一致)
+                # 计算公式：old_h * old_w = num_patches_ckpt 且 old_w / old_h = new_w / new_h
+                ratio = new_w / new_h # 宽高比
+                old_h = int(math.sqrt(num_patches_ckpt / ratio))
+                old_w = int(num_patches_ckpt / old_h)
+                
+                # 执行双三次插值 (Bicubic Interpolation)
+                # 变换维度: [1, N, C] -> [1, C, H, W] 以便进行 2D 插值
+                pos_embed_ckpt = pos_embed_ckpt.permute(0, 2, 1).reshape(1, embed_dim, old_h, old_w)
+                
+                # 插值到新尺寸
+                new_pos_embed = F.interpolate(
+                    pos_embed_ckpt, size=(new_h, new_w), mode='bicubic', align_corners=False
+                )
+                
+                # 恢复维度: [1, C, H, W] -> [1, N, C]
+                new_pos_embed = new_pos_embed.flatten(2).transpose(1, 2)
+                
+                # 将插值后的权重放回字典
+                new_state_dict['pos_embed'] = new_pos_embed
+
+        # 4. 加载处理后的权重
+        # 使用 strict=False，允许忽略一些不匹配的非关键参数
+        self.model.load_state_dict(new_state_dict, strict=False) 
+
+        # 5. 尝试加载优化器状态
+        # 如果分辨率变了，优化器里的动量参数形状也会变，直接加载会报错。
+        # 这里使用 try-except 跳过优化器加载，相当于保留预训练权重但重置优化器。
+        if self.params.resuming:
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            except Exception as e:
+                logging.warning(f"⚠️ 分辨率已改变，无法加载旧的优化器状态 (Optimizer State)，将使用新的优化器重新开始训练。")
+                # logging.warning(f"错误详情: {e}")
+        
+        # 恢复 epoch 和 iters 计数
+        self.iters = checkpoint['iters']
+        self.startEpoch = checkpoint['epoch']
     def load_checkpoint_cl(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cuda:{}'.format(self.params.local_rank))
         static_state = checkpoint['model_state']
